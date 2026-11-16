@@ -12,9 +12,23 @@ let categoryCounts = {
 };
 
 let rawCSVText = "";
-let selectedYear = 2026; // Anno predefinito
+let selectedYear = 2026;
 
-// Coordinate dei punti della timeline a destra
+// Mappatura delle categorie del dataset
+const categoryMapping = {
+  "language_profanity": "LANGUAGE PROFANITY",
+  "religious_objection": "RELIGIOUS THEMES",
+  "drug_or_alcohol_content": "DRUG OR ALCOHOL",
+  "violence": "VIOLENCE",
+  "lgbtq_themes": "LGBTQ+ THEMES",
+  "political_content": "POLITICAL CONTENT",
+  "racial_themes": "RACIAL THEMES",
+  "legal_compliance": "LEGAL COMPLIANCE",
+  "unspecified": "UNSPECIFIED",
+  "sexual_content": "SEXUAL CONTENT"
+};
+
+// Coordinate timeline
 let yearNodes = [
   { year: 2026, x: 0, y: 0 },
   { year: 2025, x: 0, y: 0 }
@@ -24,7 +38,7 @@ function setup() {
   let canvas = createCanvas(1180, 680);
   canvas.parent('canvas-container');
 
-  // Caricamento del file CSV
+  // Caricamento CSV
   fetch('assets/BANNED_INDEX.csv')
     .then(response => {
       if (!response.ok) throw new Error("CSV non trovato");
@@ -35,90 +49,163 @@ function setup() {
       calculateCountsFromCSV(selectedYear);
     })
     .catch(err => {
-      console.error("Errore nel caricamento del CSV:", err);
+      console.error("Errore caricamento CSV:", err);
     });
 }
 
-// Parser CSV robusto per gestire le virgolette e le virgole nei testi
-function parseCSVLine(text) {
-  let result = [];
-  let current = '';
+
+// PARSER CSV
+// Gestisce virgolette, virgole e ritorni a capo
+
+function parseCSV(text) {
+  let rows = [];
+  let row = [];
+  let cell = "";
   let inQuotes = false;
 
   for (let i = 0; i < text.length; i++) {
     let char = text[i];
+
     if (char === '"') {
-      inQuotes = !inQuotes;
+
+      if (inQuotes && text[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+
     } else if (char === ',' && !inQuotes) {
-      result.push(current);
-      current = '';
+
+      row.push(cell);
+      cell = "";
+
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+
+      if (char === '\r' && text[i + 1] === '\n') {
+        i++;
+      }
+
+      row.push(cell);
+      rows.push(row);
+
+      row = [];
+      cell = "";
+
     } else {
-      current += char;
+      cell += char;
     }
   }
-  result.push(current);
-  return result;
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows;
 }
 
-// Calcolo CUMULATIVO (<= targetYear) dal file CSV reale
+
+// CALCOLO LIBRI DISTINTI PER CATEGORIA
+
 function calculateCountsFromCSV(targetYear) {
+
   if (!rawCSVText) return;
 
-  // Azzeriamo i dati
+  // Azzeramento conteggi
   for (let key in categoryCounts) {
     categoryCounts[key] = 0;
   }
 
-  let lines = rawCSVText.split(/\r?\n/);
-  if (lines.length < 2) return;
+  let rows = parseCSV(rawCSVText);
 
-  // Identifichiamo gli indici delle colonne dal testo originale
-  let headers = parseCSVLine(lines[0]);
-  let dateColIndex = headers.findIndex(h => h.trim().replace(/"/g, '') === 'date_reported');
-  let categoryColIndex = headers.findIndex(h => h.trim().replace(/"/g, '') === 'reason_categories');
+  if (rows.length < 2) return;
 
-  if (dateColIndex === -1) dateColIndex = 9;
-  if (categoryColIndex === -1) categoryColIndex = 13;
+  // Individuazione colonne
+  let headers = rows[0].map(h =>
+    h.trim().replace(/^\uFEFF/, '')
+  );
 
-  for (let i = 1; i < lines.length; i++) {
-    let line = lines[i];
-    if (!line) continue;
+  let bookColIndex = headers.indexOf("book_id");
+  let dateColIndex = headers.indexOf("date_reported");
+  let categoryColIndex = headers.indexOf("reason_categories");
 
-    let columns = parseCSVLine(line);
-
-    if (columns.length > dateColIndex) {
-      let dateReported = columns[dateColIndex];
-
-      if (dateReported) {
-        // Estraiamo l'anno dalla data (es. "2025-06-30" -> 2025)
-        let match = dateReported.match(/\b(19|20)\d{2}\b/);
-        
-        if (match) {
-          let banYear = parseInt(match[0]);
-
-          // CUMULATIVO: include tutti i ban verificatisi entro l'anno selezionato
-          if (banYear <= targetYear) {
-            let catString = columns[categoryColIndex] || line;
-
-            if (catString.includes('language_profanity')) categoryCounts["LANGUAGE PROFANITY"]++;
-            if (catString.includes('religious_objection')) categoryCounts["RELIGIOUS THEMES"]++;
-            if (catString.includes('drug_or_alcohol')) categoryCounts["DRUG OR ALCOHOL"]++;
-            if (catString.includes('violence')) categoryCounts["VIOLENCE"]++;
-            if (catString.includes('lgbtq_themes')) categoryCounts["LGBTQ+ THEMES"]++;
-            if (catString.includes('political_content')) categoryCounts["POLITICAL CONTENT"]++;
-            if (catString.includes('racial_themes')) categoryCounts["RACIAL THEMES"]++;
-            if (catString.includes('legal_compliance')) categoryCounts["LEGAL COMPLIANCE"]++;
-            if (catString.includes('unspecified')) categoryCounts["UNSPECIFIED"]++;
-            if (catString.includes('sexual_content')) categoryCounts["SEXUAL CONTENT"]++;
-          }
-        }
-      }
-    }
+  if (
+    bookColIndex === -1 ||
+    dateColIndex === -1 ||
+    categoryColIndex === -1
+  ) {
+    console.error("Colonne necessarie non trovate");
+    return;
   }
+
+  // Set per evitare duplicati
+  let booksByCategory = {};
+
+  for (let category in categoryMapping) {
+    booksByCategory[category] = new Set();
+  }
+
+  // Analisi delle righe CSV
+  for (let i = 1; i < rows.length; i++) {
+
+    let columns = rows[i];
+
+    let bookId = columns[bookColIndex];
+    let dateReported = columns[dateColIndex] || "";
+    let catString = columns[categoryColIndex] || "";
+
+    if (!bookId || !bookId.trim()) continue;
+
+    // Estrazione date
+    let dates = dateReported.match(
+      /\d{4}-\d{2}-\d{2}/g
+    ) || [];
+
+    // Controllo anno cumulativo
+    let validYear = dates.some(date => {
+      let year = parseInt(date.substring(0, 4));
+      return year <= targetYear;
+    });
+
+    if (!validYear) continue;
+
+    // Separazione categorie
+    let categories = catString
+      .split(/[;\r\n]+/)
+      .map(c => c.trim())
+      .filter(c => c.length > 0);
+
+    // Conteggio libri distinti
+    categories.forEach(category => {
+
+      if (booksByCategory[category]) {
+        booksByCategory[category].add(bookId.trim());
+      }
+
+    });
+  }
+
+  // Trasferimento conteggi
+  for (let category in categoryMapping) {
+
+    let displayName = categoryMapping[category];
+
+    categoryCounts[displayName] =
+      booksByCategory[category].size;
+
+  }
+
+  console.log("Anno selezionato:", targetYear);
+  console.table(categoryCounts);
 }
 
+
+// DISEGNO GRAFICO
+
 function draw() {
-  background(13, 26, 21); // Verde scuro come nello mockup della Visione 1
+
+  background(13, 26, 21);
 
   let startX = 30;
   let startY = 20;
@@ -129,65 +216,102 @@ function draw() {
   stroke(229, 236, 233, 180);
   strokeWeight(1);
   noFill();
+
   rect(startX, startY, totalWidth, totalHeight);
-  rect(startX + 3, startY + 3, totalWidth - 6, totalHeight - 6);
+  rect(startX + 3, startY + 3,
+       totalWidth - 6, totalHeight - 6);
 
   let categories = Object.keys(categoryCounts);
+
   let rowHeight = (totalHeight - 10) / categories.length;
 
-  let maxVal = Math.max(...Object.values(categoryCounts));
-  if (maxVal === 0) maxVal = 100;
-
-  // 1. Scaffali orizzontali e libri verticali
+  // Scaffali orizzontali
   for (let i = 0; i < categories.length; i++) {
+
     let catName = categories[i];
     let count = categoryCounts[catName];
+
     let y = startY + 5 + i * rowHeight;
+
+    // Una barra = 50 libri
+    let booksToDraw = Math.floor(count / 50);
 
     // Linea orizzontale
     stroke(229, 236, 233, 120);
     strokeWeight(1);
-    line(startX + 5, y + rowHeight, startX + totalWidth - 5, y + rowHeight);
 
-    // Titolo Categoria a destra
+    line(
+      startX + 5,
+      y + rowHeight,
+      startX + totalWidth - 5,
+      y + rowHeight
+    );
+
+    // Titolo categoria
     fill(229, 236, 233);
     noStroke();
+
     textSize(13);
     textFont('Courier New');
     textStyle(BOLD);
     textAlign(RIGHT, TOP);
-    text(catName, startX + totalWidth - 15, y + 8);
 
-    // Disegno dei dorsi dei libri in verticale
-    let maxBooksToDraw = 70;
-    let booksToDraw = map(count, 0, maxVal, 0, maxBooksToDraw);
-    if (count > 0 && booksToDraw < 1) booksToDraw = 1;
+    text(
+      catName,
+      startX + totalWidth - 15,
+      y + 8
+    );
 
+    // Dorsi dei libri
     let bookWidth = 6;
     let bookGap = 3;
+
     let bookHeight = rowHeight - 16;
     let bookBaseY = y + rowHeight - 4;
 
     for (let b = 0; b < booksToDraw; b++) {
-      let bookX = startX + 15 + b * (bookWidth + bookGap);
+
+      let bookX =
+        startX + 15 + b * (bookWidth + bookGap);
 
       stroke(13, 26, 21);
       strokeWeight(0.5);
+
       fill(235, 240, 235);
-      rect(bookX, bookBaseY - bookHeight, bookWidth, bookHeight);
+
+      rect(
+        bookX,
+        bookBaseY - bookHeight,
+        bookWidth,
+        bookHeight
+      );
     }
   }
 
-  // 2. Timeline ad arco a destra
-  drawTimeline(startX + totalWidth + 20, startY + totalHeight / 2);
+  // Timeline a destra
+  drawTimeline(
+    startX + totalWidth + 20,
+    startY + totalHeight / 2
+  );
 }
 
+
+// TIMELINE
+
 function drawTimeline(centerX, centerY) {
+
   noFill();
   stroke(229, 236, 233, 100);
   strokeWeight(1.5);
 
-  arc(centerX, centerY, 140, 320, -HALF_PI + 0.3, HALF_PI - 0.3);
+  arc(
+    centerX,
+    centerY,
+    140,
+    320,
+    -HALF_PI + 0.3,
+    HALF_PI - 0.3
+  );
 
   yearNodes[0].x = centerX + 60;
   yearNodes[0].y = centerY - 60;
@@ -196,37 +320,61 @@ function drawTimeline(centerX, centerY) {
   yearNodes[1].y = centerY + 60;
 
   for (let i = 0; i < yearNodes.length; i++) {
+
     let node = yearNodes[i];
-    let isSelected = (node.year === selectedYear);
+
+    let isSelected = node.year === selectedYear;
 
     if (isSelected) {
+
       fill(235, 240, 235);
       stroke(235, 240, 235);
       circle(node.x, node.y, 10);
+
     } else {
+
       noFill();
       stroke(229, 236, 233, 150);
       circle(node.x, node.y, 7);
+
     }
 
     fill(isSelected ? 255 : 180);
     noStroke();
+
     textSize(14);
     textFont('Courier New');
     textStyle(isSelected ? BOLD : NORMAL);
     textAlign(LEFT, CENTER);
+
     text(node.year, node.x + 15, node.y);
   }
 }
 
-// Click del mouse per cambiare anno (2025 vs 2026)
+
+// CAMBIO ANNO CON CLICK
+
 function mousePressed() {
+
   for (let i = 0; i < yearNodes.length; i++) {
+
     let node = yearNodes[i];
+
     let d = dist(mouseX, mouseY, node.x, node.y);
-    if (d < 25 || (mouseX >= node.x && mouseX <= node.x + 60 && abs(mouseY - node.y) < 15)) {
+
+    if (
+      d < 25 ||
+      (
+        mouseX >= node.x &&
+        mouseX <= node.x + 60 &&
+        abs(mouseY - node.y) < 15
+      )
+    ) {
+
       selectedYear = node.year;
+
       calculateCountsFromCSV(selectedYear);
+
       break;
     }
   }
